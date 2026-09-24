@@ -1,5 +1,6 @@
 import {hash,sameOrigin} from '@/lib/server';
 import {supabaseOne,supabaseQuery,filter,productView} from '@/lib/supabase';
+import {paymentsReady,stripeClient,reconcilePayment} from '@/lib/payments';
 
 export async function GET(r:Request) {
   try {
@@ -7,8 +8,13 @@ export async function GET(r:Request) {
     if(code) {
       const token=url.searchParams.get('token') || '';
       if(!/^LOT-[A-F0-9]{16}$/.test(code) || token.length!==36) return Response.json({error:'Kiểm tra mã đơn và mã tra cứu.'},{status:404});
-      const row=await supabaseOne('orders',{},filter({code:`eq.${code}`,token_hash:`eq.${await hash(token)}`,select:'code,subtotal,shipping_cost,grand_total,status,shipment,payment_status'}));
-      return row ? Response.json({...row,total:row.grand_total},{headers:{'Cache-Control':'no-store'}}) : Response.json({error:'Không tìm thấy đơn hàng. Kiểm tra mã đơn và mã tra cứu.'},{status:404});
+      const row=await supabaseOne('orders',{},filter({code:`eq.${code}`,token_hash:`eq.${await hash(token)}`,select:'code,subtotal,shipping_cost,grand_total,status,shipment,payment_status,stripe_checkout_session_id'}));
+      if(!row)return Response.json({error:'Không tìm thấy đơn hàng. Kiểm tra mã đơn và mã tra cứu.'},{status:404});
+      if(row.stripe_checkout_session_id&&row.payment_status!=='paid'){
+        try{const session=await stripeClient().checkout.sessions.retrieve(row.stripe_checkout_session_id);await reconcilePayment(session);const fresh=await supabaseOne('orders',{},filter({code:`eq.${code}`,select:'payment_status'}));row.payment_status=fresh?.payment_status||row.payment_status}catch{/* The last verified status remains available during Stripe outages. */}
+      }
+      const {stripe_checkout_session_id,...publicRow}=row;
+      return Response.json({...publicRow,total:row.grand_total,can_pay:paymentsReady()&&row.status==='Đã xác nhận'&&row.payment_status!=='paid',test_mode:true},{headers:{'Cache-Control':'no-store'}});
     }
     const rows=await supabaseQuery('products',{},filter({select:'id,name,brand,category,price,image_url,description,weight_lb,active',active:'eq.true',order:'id.desc'}));
     return Response.json({products:rows.map(productView)},{headers:{'Cache-Control':'no-store'}});
